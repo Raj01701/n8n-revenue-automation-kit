@@ -1,0 +1,17 @@
+# Real configuration and secrets. Only .env.example belongs in git.
+infra/.env
+infra/Caddyfile
+*.env
+!infra/.env.example
+
+# Backups and dumps
+backups/
+*.tar.gz
+*.dump
+*.sql.gz
+
+# Logs and OS noise
+*.log
+.DS_Store
+
+node_modules/

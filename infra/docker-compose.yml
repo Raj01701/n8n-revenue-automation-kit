@@ -1,0 +1,226 @@
+########################################################################
+# Self-hosted n8n for the revenue automation stack.
+#
+#   cp .env.example .env    # fill it in, then:
+#   docker compose up -d
+#
+# Two Postgres databases live in one server here: n8n's own (executions,
+# credentials, workflow history) and revenue_ops (sql/schema.sql). They are
+# created by db/init/01-databases.sh on first boot of an empty volume.
+#
+# n8n is NOT published on a host port. Caddy terminates TLS and proxies to it
+# over the internal network, so the editor and the webhook endpoints are never
+# reachable except over HTTPS. See Caddyfile.example.
+########################################################################
+
+name: n8n-revenue
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    # Pinned. Postgres minor upgrades are safe; major ones need a dump/restore.
+    image: postgres:16.4-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REVENUE_OPS_DB: ${REVENUE_OPS_DB}
+      # Fail fast on a weak setup rather than silently allowing trust auth.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+  n8n:
+    # Pin the exact version you tested. "latest" means an unattended restart can
+    # change your node behaviour at 3am. Check github.com/n8n-io/n8n/releases
+    # and bump deliberately, on staging first.
+    image: docker.n8n.io/n8nio/n8n:2.40.5
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # --- identity / URLs -------------------------------------------------
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}
+      # WEBHOOK_URL must be the public HTTPS origin, or the URL n8n shows you
+      # for a production webhook will be the container's internal address and
+      # the payment provider will never reach it.
+      WEBHOOK_URL: https://${N8N_HOST}/
+      N8N_PROXY_HOPS: 1
+
+      # --- secrets ---------------------------------------------------------
+      # Credentials in the database are encrypted with this key. Lose it and
+      # every stored credential is unrecoverable; change it and n8n refuses to
+      # start against an existing database. It belongs in your backup.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- persistence -----------------------------------------------------
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: public
+
+      # --- execution data pruning -----------------------------------------
+      # Without this the execution tables grow without limit and eventually
+      # the disk, not the workflow, is what takes the business down.
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE}
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "true"
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+
+      # --- Code node requirements -----------------------------------------
+      # The signature-verification Code nodes in workflows 01 and 02 require
+      # both of these. crypto is not importable in a Code node by default, and
+      # newer n8n blocks $env access from Code nodes unless told otherwise.
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+
+      # --- application env read by the workflows via {{ $env.X }} ----------
+      PAYMENT_PROVIDER_NAME: ${PAYMENT_PROVIDER_NAME}
+      PAYMENT_API_BASE: ${PAYMENT_API_BASE}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
+      THINKIFIC_API_BASE: ${THINKIFIC_API_BASE}
+      THINKIFIC_TEMP_PASSWORD: ${THINKIFIC_TEMP_PASSWORD}
+      EMAIL_API_BASE: ${EMAIL_API_BASE}
+      BILLING_PORTAL_URL: ${BILLING_PORTAL_URL}
+      DEFAULT_COURSE_ID: ${DEFAULT_COURSE_ID}
+      SLACK_ENROLMENTS_CHANNEL: ${SLACK_ENROLMENTS_CHANNEL}
+      SLACK_ALERTS_CHANNEL: ${SLACK_ALERTS_CHANNEL}
+      RECONCILIATION_TIMEZONE: ${GENERIC_TIMEZONE}
+
+      # --- housekeeping ----------------------------------------------------
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${GENERIC_TIMEZONE}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "true"
+      N8N_HIRING_BANNER_ENABLED: "false"
+      N8N_PAYLOAD_SIZE_MAX: 16
+      N8N_LOG_LEVEL: info
+      N8N_RUNNERS_ENABLED: "true"
+
+      # --- queue mode (see the commented redis/worker services below) ------
+      # EXECUTIONS_MODE: queue
+      # QUEUE_BULL_REDIS_HOST: redis
+      # QUEUE_BULL_REDIS_PORT: 6379
+      # QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      # OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Shared scratch space for workflows that write files. Backed up with the
+      # rest of n8n_data.
+      - n8n_files:/files
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks: [internal, web]
+
+  caddy:
+    # TLS, HTTP/2 and automatic certificate renewal, with no certbot cron to
+    # forget about. See Caddyfile.example.
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      - n8n
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      N8N_HOST: ${N8N_HOST}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+
+  # --------------------------------------------------------------------
+  # Queue mode. Turn this on when one n8n process can no longer keep up -
+  # in practice, when webhook responses start queueing behind long
+  # executions, or when a Wait node holding an execution blocks throughput.
+  #
+  # To enable: uncomment redis and n8n-worker, uncomment the EXECUTIONS_MODE
+  # block in the n8n service above, then `docker compose up -d`.
+  # --------------------------------------------------------------------
+  # redis:
+  #   image: redis:7.4-alpine
+  #   restart: unless-stopped
+  #   command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+  #   volumes:
+  #     - redis_data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+  #   networks: [internal]
+  #
+  # n8n-worker:
+  #   image: docker.n8n.io/n8nio/n8n:2.40.5
+  #   restart: unless-stopped
+  #   command: worker --concurrency=10
+  #   depends_on:
+  #     n8n:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   environment:
+  #     # A worker needs the same encryption key and the same database as the
+  #     # main instance, or it cannot decrypt the credentials it is asked to use.
+  #     N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+  #     DB_TYPE: postgresdb
+  #     DB_POSTGRESDB_HOST: postgres
+  #     DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+  #     DB_POSTGRESDB_USER: ${POSTGRES_USER}
+  #     DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+  #     EXECUTIONS_MODE: queue
+  #     QUEUE_BULL_REDIS_HOST: redis
+  #     NODE_FUNCTION_ALLOW_BUILTIN: crypto
+  #     N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+  #     GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+  #     TZ: ${GENERIC_TIMEZONE}
+  #   volumes:
+  #     - n8n_data:/home/node/.n8n
+  #     - n8n_files:/files
+  #   networks: [internal]
+
+networks:
+  internal:
+    internal: true
+  web:
+
+volumes:
+  postgres_data:
+  n8n_data:
+  n8n_files:
+  caddy_data:
+  caddy_config:
+  # redis_data:

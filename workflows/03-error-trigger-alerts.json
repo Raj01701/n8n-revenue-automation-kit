@@ -1,0 +1,126 @@
+{
+  "name": "03 - Error Trigger Alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        300
+      ],
+      "id": "7c9e6b03-0001-4a3b-9c2d-000000000001",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// The Error Trigger receives one item describing the failed execution.\n// Shape: { execution: { id, url, error, lastNodeExecuted, mode, retryOf }, workflow: { id, name } }\n// A workflow that fails before any node runs (e.g. a bad trigger) sends { trigger: { error } } instead.\nconst payload = $input.first().json;\n\nconst workflow = payload.workflow || {};\nconst execution = payload.execution || {};\nconst trigger = payload.trigger || {};\nconst error = execution.error || trigger.error || {};\n\nconst failedNode =\n  (error.node && error.node.name) || execution.lastNodeExecuted || 'trigger / before first node';\n\nconst message = error.message || 'No error message was supplied by n8n';\nconst description = error.description || null;\n\n// The item that was in flight when the node threw. n8n puts it on the error\n// context when it is available; it is the single most useful thing in the alert.\nconst context = error.context || {};\nconst inputItem = context.itemIndex !== undefined\n  ? { item_index: context.itemIndex, data: context.data || null }\n  : null;\n\nconst excerpt = JSON.stringify(inputItem || context || {}).slice(0, 1500);\n\nconst lines = [\n  ':boom: *n8n workflow failed*',\n  '• Workflow: *' + (workflow.name || 'unknown') + '*  (`' + (workflow.id || 'unknown') + '`)',\n  '• Failing node: *' + failedNode + '*',\n  '• Error: ' + message,\n];\nif (description) lines.push('• Detail: ' + description);\nlines.push('• Mode: ' + (execution.mode || 'unknown'));\nif (execution.retryOf) lines.push('• This was a retry of execution ' + execution.retryOf);\nlines.push('• Execution: ' + (execution.url || 'not available (manual execution)'));\nlines.push('• Item in flight: `' + excerpt.slice(0, 900) + '`');\n\nreturn [\n  {\n    json: {\n      workflow_id: workflow.id || null,\n      workflow_name: workflow.name || null,\n      execution_id: execution.id || null,\n      execution_url: execution.url || null,\n      failed_node: failedNode,\n      error_name: error.name || 'Error',\n      error_message: message,\n      error_description: description,\n      error_stack: (error.stack || '').slice(0, 2000) || null,\n      execution_mode: execution.mode || null,\n      retry_of: execution.retryOf || null,\n      input_excerpt: excerpt,\n      occurred_at: new Date().toISOString(),\n      slack_text: lines.join('\\n'),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        300
+      ],
+      "id": "7c9e6b03-0002-4a3b-9c2d-000000000002",
+      "name": "Format Alert"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        240,
+        200
+      ],
+      "id": "7c9e6b03-0003-4a3b-9c2d-000000000003",
+      "name": "Slack - Post Failure Alert",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "INSERT INTO failures (\n  workflow_id, workflow_name, execution_id, execution_url,\n  failed_node, error_name, error_message, error_description, error_stack,\n  execution_mode, retry_of, input_excerpt\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [$json.workflow_id, $json.workflow_name, $json.execution_id, $json.execution_url, $json.failed_node, $json.error_name, $json.error_message, $json.error_description, $json.error_stack, $json.execution_mode, $json.retry_of, $json.input_excerpt] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        420
+      ],
+      "id": "7c9e6b03-0004-4a3b-9c2d-000000000004",
+      "name": "Record Failure For Weekly Review",
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres - n8n operations DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Slack - Post Failure Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Record Failure For Weekly Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "timezone": "Australia/Sydney"
+  },
+  "pinData": {}
+}

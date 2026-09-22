@@ -1,0 +1,801 @@
+{
+  "name": "02 - Failed Payment Recovery (Dunning)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "payments/failed",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -380,
+        340
+      ],
+      "id": "7c9e6b02-0001-4a3b-9c2d-000000000001",
+      "name": "Failed Payment Webhook",
+      "webhookId": "c41d7e6a-9b02-4f38-8a55-failed-payme"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Verify the payment provider's webhook signature before trusting a single field.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false\n// on the n8n container (both are set in infra/docker-compose.yml).\nconst crypto = require('crypto');\n\nconst secret = $env.PAYMENT_WEBHOOK_SECRET;\nif (!secret) {\n  throw new Error('PAYMENT_WEBHOOK_SECRET is not set on this n8n instance');\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const headers = item.json.headers || {};\n  const signatureHeader = headers['x-provider-signature'] || headers['stripe-signature'] || '';\n\n  // The Webhook node runs with \"Raw Body\" on, so the exact bytes the provider\n  // signed are in binary.data - not in the parsed JSON body. Re-serialising the\n  // parsed body would change key order and break the HMAC.\n  const rawBody = item.binary && item.binary.data && item.binary.data.data\n    ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n    : JSON.stringify(item.json.body || {});\n\n  // Header format: t=<unix seconds>,v1=<hex hmac of \"<t>.<rawBody>\">\n  const parts = {};\n  for (const pair of String(signatureHeader).split(',')) {\n    const [k, v] = pair.split('=');\n    if (k && v) parts[k.trim()] = v.trim();\n  }\n\n  if (!parts.t || !parts.v1) {\n    throw new Error('Missing or malformed signature header - request rejected');\n  }\n\n  const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - Number(parts.t));\n  if (ageSeconds > 300) {\n    throw new Error('Signature timestamp is ' + ageSeconds + 's old - replay rejected');\n  }\n\n  const expected = crypto\n    .createHmac('sha256', secret)\n    .update(parts.t + '.' + rawBody)\n    .digest('hex');\n\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(parts.v1, 'utf8');\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('Webhook signature did not match - request rejected');\n  }\n\n  const event = JSON.parse(rawBody);\n  const object = (event.data && event.data.object) || {};\n  const metadata = object.metadata || {};\n\n  const FAILURE_EVENTS = ['invoice.payment_failed', 'charge.failed', 'payment_intent.payment_failed'];\n  if (!FAILURE_EVENTS.includes(event.type)) {\n    throw new Error('Unexpected event type on the failed-payment webhook: ' + event.type);\n  }\n\n  const fullName = String(object.customer_name || metadata.student_name || '').trim();\n  const nameParts = fullName ? fullName.split(/\\s+/) : [];\n\n  results.push({\n    json: {\n      provider: $env.PAYMENT_PROVIDER_NAME || 'payment-provider',\n      event_id: event.id,\n      event_type: event.type,\n      email: String(object.customer_email || object.email || metadata.email || '')\n        .toLowerCase()\n        .trim(),\n      first_name: nameParts[0] || 'Student',\n      last_name: nameParts.slice(1).join(' ') || '-',\n      customer_id: object.customer || null,\n      invoice_id: object.invoice || object.id || null,\n      amount_cents: object.amount_total || object.amount_paid || object.amount_due || object.amount || null,\n      currency: object.currency || null,\n      course_id: metadata.course_id || $env.DEFAULT_COURSE_ID,\n      attempt_count: object.attempt_count || 1,\n      next_payment_attempt: object.next_payment_attempt || null,\n\n      raw: event,\n    },\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        340
+      ],
+      "id": "7c9e6b02-0002-4a3b-9c2d-000000000002",
+      "name": "Verify Signature"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "-- Same guard as workflow 01. Without it, a provider retry 30 seconds later would\n-- start a second dunning sequence and the customer would get every email twice.\nINSERT INTO processed_events (provider, provider_event_id, event_type, payload)\nVALUES ($1, $2, $3, $4::jsonb)\nON CONFLICT (provider, provider_event_id) DO NOTHING\nRETURNING id, received_at;",
+        "options": {
+          "queryReplacement": "={{ [$json.provider, $json.event_id, $json.event_type, JSON.stringify($json.raw)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        60,
+        340
+      ],
+      "id": "7c9e6b02-0003-4a3b-9c2d-000000000003",
+      "name": "Idempotency Guard",
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres - n8n operations DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c9e6bff-0004-4a3b-9c2d-000000000004",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        280,
+        340
+      ],
+      "id": "7c9e6b02-0005-4a3b-9c2d-000000000005",
+      "name": "First Delivery Of This Event?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        500,
+        540
+      ],
+      "id": "7c9e6b02-0006-4a3b-9c2d-000000000006",
+      "name": "Duplicate Event - Exit Cleanly"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EMAIL_API_BASE }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ to: $('Verify Signature').first().json.email, template: 'payment_failed_first', variables: { first_name: $('Verify Signature').first().json.first_name, amount_cents: $('Verify Signature').first().json.amount_cents, currency: $('Verify Signature').first().json.currency, invoice_id: $('Verify Signature').first().json.invoice_id, update_payment_url: $env.BILLING_PORTAL_URL, stage: 'hour-0' } }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        200
+      ],
+      "id": "7c9e6b02-0007-4a3b-9c2d-000000000007",
+      "name": "Dunning Email 1 - Immediate",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Transactional email API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "amount": 24,
+        "unit": "hours"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        200
+      ],
+      "id": "7c9e6b02-0008-4a3b-9c2d-000000000008",
+      "name": "Wait 24 Hours",
+      "webhookId": "b7a5e2c8-3f41-4d90-9d11-dunning-wait"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PAYMENT_API_BASE }}/invoices/{{ $('Verify Signature').first().json.invoice_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        200
+      ],
+      "id": "7c9e6b02-0009-4a3b-9c2d-000000000009",
+      "name": "Check Invoice At 24h",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Payment provider API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c9e6bff-0010-4a3b-9c2d-000000000010",
+              "leftValue": "={{ ['paid', 'void', 'uncollectible', 'refunded'].includes(String($json.status || '').toLowerCase()) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        200
+      ],
+      "id": "7c9e6b02-0011-4a3b-9c2d-000000000011",
+      "name": "Still Unpaid At 24h?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EMAIL_API_BASE }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ to: $('Verify Signature').first().json.email, template: 'payment_failed_reminder', variables: { first_name: $('Verify Signature').first().json.first_name, amount_cents: $('Verify Signature').first().json.amount_cents, currency: $('Verify Signature').first().json.currency, invoice_id: $('Verify Signature').first().json.invoice_id, update_payment_url: $env.BILLING_PORTAL_URL, stage: 'hour-24' } }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        120
+      ],
+      "id": "7c9e6b02-0012-4a3b-9c2d-000000000012",
+      "name": "Dunning Email 2 - Day 1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Transactional email API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "amount": 48,
+        "unit": "hours"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        120
+      ],
+      "id": "7c9e6b02-0013-4a3b-9c2d-000000000013",
+      "name": "Wait A Further 48 Hours",
+      "webhookId": "e9c1f430-77aa-4b62-8c03-dunning-wait"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PAYMENT_API_BASE }}/invoices/{{ $('Verify Signature').first().json.invoice_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        120
+      ],
+      "id": "7c9e6b02-0014-4a3b-9c2d-000000000014",
+      "name": "Check Invoice At 72h",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Payment provider API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c9e6bff-0015-4a3b-9c2d-000000000015",
+              "leftValue": "={{ ['paid', 'void', 'uncollectible', 'refunded'].includes(String($json.status || '').toLowerCase()) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2040,
+        120
+      ],
+      "id": "7c9e6b02-0016-4a3b-9c2d-000000000016",
+      "name": "Still Unpaid At 72h?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EMAIL_API_BASE }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ to: $('Verify Signature').first().json.email, template: 'payment_failed_final', variables: { first_name: $('Verify Signature').first().json.first_name, amount_cents: $('Verify Signature').first().json.amount_cents, currency: $('Verify Signature').first().json.currency, invoice_id: $('Verify Signature').first().json.invoice_id, update_payment_url: $env.BILLING_PORTAL_URL, stage: 'hour-72' } }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2260,
+        40
+      ],
+      "id": "7c9e6b02-0017-4a3b-9c2d-000000000017",
+      "name": "Dunning Email 3 - Final Notice",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Transactional email API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT thinkific_enrolment_id, thinkific_user_id, course_id\n  FROM enrolments\n WHERE email = $1\n   AND course_id = $2\n   AND state <> 'revoked'\n ORDER BY created_at DESC\n LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [$('Verify Signature').first().json.email, $('Verify Signature').first().json.course_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2480,
+        40
+      ],
+      "id": "7c9e6b02-0018-4a3b-9c2d-000000000018",
+      "name": "Find Active Enrolment",
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres - n8n operations DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $env.THINKIFIC_API_BASE }}/enrollments/{{ $json.thinkific_enrolment_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ expired_at: new Date().toISOString() }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2700,
+        40
+      ],
+      "id": "7c9e6b02-0019-4a3b-9c2d-000000000019",
+      "name": "Revoke Course Access",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Thinkific API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "WITH revoked AS (\n  UPDATE enrolments\n     SET state = 'revoked',\n         updated_at = now()\n   WHERE email = $1\n     AND course_id = $2\n     AND state <> 'revoked'\n  RETURNING id, provider_event_id\n)\nUPDATE processed_events p\n   SET status = 'completed',\n       completed_at = now()\n WHERE p.provider = $3\n   AND p.provider_event_id = $4\nRETURNING p.provider_event_id, (SELECT count(*) FROM revoked) AS revoked_count;",
+        "options": {
+          "queryReplacement": "={{ [$('Verify Signature').first().json.email, $('Verify Signature').first().json.course_id, $('Verify Signature').first().json.provider, $('Verify Signature').first().json.event_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2920,
+        40
+      ],
+      "id": "7c9e6b02-0020-4a3b-9c2d-000000000020",
+      "name": "Record Revocation",
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres - n8n operations DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "=:no_entry: *Dunning exhausted - course access revoked*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Course: {{ $('Verify Signature').first().json.course_id }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n• Emails sent: 0h, 24h, 72h - invoice still unpaid at each check\n• Enrolment rows revoked: {{ $json.revoked_count }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        3140,
+        40
+      ],
+      "id": "7c9e6b02-0021-4a3b-9c2d-000000000021",
+      "name": "Slack - Access Revoked",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ENROLMENTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "=:moneybag: *Failed payment recovered - dunning stopped*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}` is now *{{ $json.status }}*\n• No further chase emails will be sent and access was never touched.",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1600,
+        400
+      ],
+      "id": "7c9e6b02-0022-4a3b-9c2d-000000000022",
+      "name": "Slack - Payment Recovered",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "=:warning: *Dunning sequence step failed*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n• Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n• Execution: {{ $execution.url }}\n\nAccess has *not* been revoked - a failed check must never be read as 'still unpaid'.",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1820,
+        620
+      ],
+      "id": "7c9e6b02-0023-4a3b-9c2d-000000000023",
+      "name": "Slack - Dunning Step Failed",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Failed Payment Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature": {
+      "main": [
+        [
+          {
+            "node": "Idempotency Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Idempotency Guard": {
+      "main": [
+        [
+          {
+            "node": "First Delivery Of This Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "First Delivery Of This Event?": {
+      "main": [
+        [
+          {
+            "node": "Dunning Email 1 - Immediate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Duplicate Event - Exit Cleanly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dunning Email 1 - Immediate": {
+      "main": [
+        [
+          {
+            "node": "Wait 24 Hours",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 24 Hours": {
+      "main": [
+        [
+          {
+            "node": "Check Invoice At 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Invoice At 24h": {
+      "main": [
+        [
+          {
+            "node": "Still Unpaid At 24h?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still Unpaid At 24h?": {
+      "main": [
+        [
+          {
+            "node": "Dunning Email 2 - Day 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Payment Recovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dunning Email 2 - Day 1": {
+      "main": [
+        [
+          {
+            "node": "Wait A Further 48 Hours",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait A Further 48 Hours": {
+      "main": [
+        [
+          {
+            "node": "Check Invoice At 72h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Invoice At 72h": {
+      "main": [
+        [
+          {
+            "node": "Still Unpaid At 72h?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still Unpaid At 72h?": {
+      "main": [
+        [
+          {
+            "node": "Dunning Email 3 - Final Notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Payment Recovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dunning Email 3 - Final Notice": {
+      "main": [
+        [
+          {
+            "node": "Find Active Enrolment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Active Enrolment": {
+      "main": [
+        [
+          {
+            "node": "Revoke Course Access",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revoke Course Access": {
+      "main": [
+        [
+          {
+            "node": "Record Revocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Dunning Step Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Revocation": {
+      "main": [
+        [
+          {
+            "node": "Slack - Access Revoked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "timezone": "Australia/Sydney",
+    "errorWorkflow": "REPLACE_WITH_ERROR_WORKFLOW_ID"
+  },
+  "pinData": {}
+}

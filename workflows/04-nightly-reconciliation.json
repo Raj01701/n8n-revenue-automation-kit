@@ -1,0 +1,388 @@
+{
+  "name": "04 - Nightly Payment / Enrolment Reconciliation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 2,
+              "triggerAtMinute": 15
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -380,
+        300
+      ],
+      "id": "7c9e6b04-0001-4a3b-9c2d-000000000001",
+      "name": "Nightly At 02:15"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Luxon is available in the Code node as DateTime. Run the window in the\n// business's own timezone - \"yesterday\" in UTC is not \"yesterday\" in Sydney.\nconst zone = $env.RECONCILIATION_TIMEZONE || 'Australia/Sydney';\nconst start = DateTime.now().setZone(zone).minus({ days: 1 }).startOf('day');\nconst end = start.endOf('day');\n\nreturn [\n  {\n    json: {\n      timezone: zone,\n      business_date: start.toISODate(),\n      from_iso: start.toUTC().toISO(),\n      to_iso: end.toUTC().toISO(),\n      from_unix: Math.floor(start.toSeconds()),\n      to_unix: Math.floor(end.toSeconds()),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        300
+      ],
+      "id": "7c9e6b04-0002-4a3b-9c2d-000000000002",
+      "name": "Yesterday Window"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PAYMENT_API_BASE }}/charges",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "created[gte]",
+              "value": "={{ $json.from_unix }}"
+            },
+            {
+              "name": "created[lte]",
+              "value": "={{ $json.to_unix }}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "pagination": {}
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        60,
+        300
+      ],
+      "id": "7c9e6b04-0003-4a3b-9c2d-000000000003",
+      "name": "Fetch Yesterdays Payments",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Payment provider API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.THINKIFIC_API_BASE }}/enrollments",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query[created_since]",
+              "value": "={{ $('Yesterday Window').first().json.from_iso }}"
+            },
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        300
+      ],
+      "id": "7c9e6b04-0004-4a3b-9c2d-000000000004",
+      "name": "Fetch Thinkific Enrolments",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Thinkific API - header auth"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Webhooks are best-effort. This is the net under them: whatever the live\n// workflows missed shows up here the same night, not in a refund request.\nconst window = $('Yesterday Window').first().json;\n\nconst paymentsResponse = $('Fetch Yesterdays Payments').first().json || {};\nconst enrolmentsResponse = $('Fetch Thinkific Enrolments').first().json || {};\n\nconst payments = (paymentsResponse.data || paymentsResponse.items || [])\n  .filter((p) => (p.status || '').toLowerCase() === 'succeeded' || p.paid === true);\nconst enrolments = enrolmentsResponse.items || enrolmentsResponse.data || [];\n\nconst normalise = (value) => String(value || '').toLowerCase().trim();\n\nconst enrolledEmails = new Set(\n  enrolments.map((e) => normalise(e.user_email || (e.user && e.user.email))),\n);\nconst paidEmails = new Set(\n  payments.map((p) => normalise(p.billing_details && p.billing_details.email ? p.billing_details.email : p.receipt_email || p.customer_email)),\n);\n\nconst missingEnrolments = payments\n  .filter((p) => {\n    const email = normalise(p.billing_details && p.billing_details.email ? p.billing_details.email : p.receipt_email || p.customer_email);\n    return email && !enrolledEmails.has(email);\n  })\n  .map((p) => ({\n    email: normalise(p.billing_details && p.billing_details.email ? p.billing_details.email : p.receipt_email || p.customer_email),\n    charge_id: p.id,\n    amount_cents: p.amount || p.amount_captured || null,\n    currency: p.currency || null,\n  }));\n\nconst orphanEnrolments = enrolments\n  .filter((e) => {\n    const email = normalise(e.user_email || (e.user && e.user.email));\n    return email && !paidEmails.has(email);\n  })\n  .map((e) => ({\n    email: normalise(e.user_email || (e.user && e.user.email)),\n    enrolment_id: e.id,\n    course_id: e.course_id || null,\n  }));\n\nreturn [\n  {\n    json: {\n      business_date: window.business_date,\n      timezone: window.timezone,\n      payments_checked: payments.length,\n      enrolments_checked: enrolments.length,\n      missing_enrolments: missingEnrolments,\n      orphan_enrolments: orphanEnrolments,\n      discrepancy_count: missingEnrolments.length + orphanEnrolments.length,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ],
+      "id": "7c9e6b04-0005-4a3b-9c2d-000000000005",
+      "name": "Compare Payments And Enrolments"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "INSERT INTO reconciliation_runs (\n  business_date, timezone, payments_checked, enrolments_checked,\n  missing_enrolment_count, orphan_enrolment_count, details\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)\nON CONFLICT (business_date) DO UPDATE\n  SET timezone = EXCLUDED.timezone,\n      payments_checked = EXCLUDED.payments_checked,\n      enrolments_checked = EXCLUDED.enrolments_checked,\n      missing_enrolment_count = EXCLUDED.missing_enrolment_count,\n      orphan_enrolment_count = EXCLUDED.orphan_enrolment_count,\n      details = EXCLUDED.details,\n      ran_at = now()\nRETURNING id, business_date;",
+        "options": {
+          "queryReplacement": "={{ [$json.business_date, $json.timezone, $json.payments_checked, $json.enrolments_checked, $json.missing_enrolments.length, $json.orphan_enrolments.length, JSON.stringify({ missing_enrolments: $json.missing_enrolments, orphan_enrolments: $json.orphan_enrolments })] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        720,
+        300
+      ],
+      "id": "7c9e6b04-0006-4a3b-9c2d-000000000006",
+      "name": "Record Reconciliation Run",
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres - n8n operations DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c9e6bff-0007-4a3b-9c2d-000000000007",
+              "leftValue": "={{ $('Compare Payments And Enrolments').first().json.discrepancy_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        300
+      ],
+      "id": "7c9e6b04-0008-4a3b-9c2d-000000000008",
+      "name": "Any Discrepancies?"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "=:mag: *Nightly reconciliation - {{ $('Compare Payments And Enrolments').first().json.business_date }}*\n• Payments checked: {{ $('Compare Payments And Enrolments').first().json.payments_checked }}\n• Enrolments checked: {{ $('Compare Payments And Enrolments').first().json.enrolments_checked }}\n\n*Paid but not enrolled ({{ $('Compare Payments And Enrolments').first().json.missing_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.missing_enrolments.map(m => '• ' + m.email + ' (' + m.charge_id + ')').join('\\n') || '_none_' }}\n\n*Enrolled with no matching payment ({{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.map(o => '• ' + o.email + ' (enrolment ' + o.enrolment_id + ')').join('\\n') || '_none_' }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1160,
+        200
+      ],
+      "id": "7c9e6b04-0009-4a3b-9c2d-000000000009",
+      "name": "Slack - Reconciliation Discrepancies",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        420
+      ],
+      "id": "7c9e6b04-0010-4a3b-9c2d-000000000010",
+      "name": "Everything Reconciled"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "=:warning: *Nightly reconciliation could not run*\n• Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n• Execution: {{ $execution.url }}\n\nNo reconciliation row was written for tonight - a silent gap in the safety net, so treat this as urgent.",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        500,
+        560
+      ],
+      "id": "7c9e6b04-0011-4a3b-9c2d-000000000011",
+      "name": "Slack - Reconciliation Failed",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack - Revenue Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Nightly At 02:15": {
+      "main": [
+        [
+          {
+            "node": "Yesterday Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Yesterday Window": {
+      "main": [
+        [
+          {
+            "node": "Fetch Yesterdays Payments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Yesterdays Payments": {
+      "main": [
+        [
+          {
+            "node": "Fetch Thinkific Enrolments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Reconciliation Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Thinkific Enrolments": {
+      "main": [
+        [
+          {
+            "node": "Compare Payments And Enrolments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Reconciliation Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare Payments And Enrolments": {
+      "main": [
+        [
+          {
+            "node": "Record Reconciliation Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Reconciliation Run": {
+      "main": [
+        [
+          {
+            "node": "Any Discrepancies?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Discrepancies?": {
+      "main": [
+        [
+          {
+            "node": "Slack - Reconciliation Discrepancies",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Everything Reconciled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "timezone": "Australia/Sydney",
+    "errorWorkflow": "REPLACE_WITH_ERROR_WORKFLOW_ID"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,75 @@
+# cp Caddyfile.example Caddyfile
+#
+# Caddy gets a certificate for {$N8N_HOST} on first start and renews it without
+# a cron job. n8n itself is never published on a host port; it is only reachable
+# through this proxy.
+
+{
+	email {$LETSENCRYPT_EMAIL}
+	# Uncomment while testing so a typo in the hostname does not burn through
+	# Let's Encrypt's rate limit for the real domain.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$N8N_HOST} {
+	encode zstd gzip
+
+	# n8n reads X-Forwarded-For to build execution URLs and rate-limit sensibly.
+	# N8N_PROXY_HOPS=1 in docker-compose.yml tells it to trust exactly one hop -
+	# this one. Raising that number without a second proxy in front lets a client
+	# spoof its own address.
+	reverse_proxy n8n:5678 {
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {remote_host}
+
+		# Long-running executions must not be cut off mid-flight.
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+	}
+}
+
+# --- nginx equivalent, if you already run nginx ------------------------------
+#
+# server {
+#     listen 443 ssl http2;
+#     server_name n8n.example.com;
+#
+#     ssl_certificate     /etc/letsencrypt/live/n8n.example.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/n8n.example.com/privkey.pem;
+#
+#     client_max_body_size 16m;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:5678;
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto https;
+#
+#         # The editor uses websockets for push updates; without these two the
+#         # canvas silently stops refreshing while executions run.
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade    $http_upgrade;
+#         proxy_set_header Connection "upgrade";
+#
+#         proxy_read_timeout  300s;
+#         proxy_send_timeout  300s;
+#     }
+# }
