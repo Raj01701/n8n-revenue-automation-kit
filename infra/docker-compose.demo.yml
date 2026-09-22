@@ -1,0 +1,82 @@
+########################################################################
+# Demo overlay. This is what the screenshots in docs/screenshots were
+# recorded against.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml \
+#     --env-file .env.demo up -d postgres n8n mock
+#
+# It differs from the production file in exactly four ways, all of them
+# because there is no public hostname and no real vendor account here:
+#
+#   1. n8n is published on localhost:5678 over plain HTTP instead of
+#      sitting behind Caddy on 443. Caddy is simply not started.
+#   2. Postgres is published on localhost:15678 so the proof queries can
+#      be run from the host.
+#   3. A `mock` service answers the payment provider, Thinkific and
+#      transactional email calls. Those three are reached through the
+#      *_API_BASE environment variables the workflows already use, so no
+#      node parameter changes.
+#   4. Slack. n8n's Slack node has no base-URL setting - it always calls
+#      https://slack.com/api. So slack.com is mapped to the mock
+#      container's address and TLS verification is turned off inside the
+#      n8n container. That is a demo-only shortcut; it is why
+#      NODE_TLS_REJECT_UNAUTHORIZED appears here and nowhere else.
+########################################################################
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:15678:5432"
+
+  n8n:
+    environment:
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://localhost:5678
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_SECURE_COOKIE: "false"
+      # Demo only: the mock Slack listener uses a self-signed certificate.
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:5678:5678"
+    extra_hosts:
+      # n8n's Slack node cannot be pointed anywhere else, so point DNS instead.
+      - "slack.com:172.28.10.10"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - n8n_files:/files
+      # Read-only so `n8n import:workflow` imports the repository's files
+      # rather than a copy someone edited in the container.
+      - ../workflows:/workflows:ro
+    networks: [internal, web, mocknet]
+
+  mock:
+    image: node:22-alpine
+    restart: unless-stopped
+    command: ["node", "/app/server.mjs"]
+    working_dir: /app
+    environment:
+      MOCK_HTTP_PORT: 4000
+      MOCK_TLS_PORT: 443
+      MOCK_TLS_DIR: /tls
+    volumes:
+      - ../mocks:/app:ro
+      - ../mocks/tls:/tls:ro
+    ports:
+      # Only the control plane and the request log are needed from the host.
+      - "127.0.0.1:4100:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      internal:
+      mocknet:
+        ipv4_address: 172.28.10.10
+
+networks:
+  mocknet:
+    ipam:
+      config:
+        - subnet: 172.28.10.0/24

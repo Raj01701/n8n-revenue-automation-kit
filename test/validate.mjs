@@ -169,6 +169,26 @@ for (const file of FILES) {
     }
   });
 
+  test(`${file}: no node both routes errors and always outputs data`, () => {
+    const wf = parsed.get(file);
+
+    // Found by running these workflows, not by reading them. `alwaysOutputData`
+    // makes a node emit an empty item when it produced none - including when it
+    // just failed. Combined with `onError: continueErrorOutput` the failure goes
+    // down BOTH outputs: the error branch alerts, and the success branch carries
+    // on with an empty item. In 01 that enrolled Thinkific user id 0 during a
+    // simulated outage; in 02 an invoice check that errored would have been read
+    // as "still unpaid" and revoked a paying customer's access.
+    for (const node of wf.nodes) {
+      if (node.onError !== 'continueErrorOutput') continue;
+      assert.notEqual(
+        node.alwaysOutputData,
+        true,
+        `"${node.name}": alwaysOutputData with continueErrorOutput sends a failure down the success branch too`,
+      );
+    }
+  });
+
   test(`${file}: settings are production settings`, () => {
     const wf = parsed.get(file);
 

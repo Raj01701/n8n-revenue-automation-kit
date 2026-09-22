@@ -23,8 +23,9 @@ x-logging: &default-logging
 
 services:
   postgres:
-    # Pinned. Postgres minor upgrades are safe; major ones need a dump/restore.
-    image: postgres:16.4-alpine
+    # Pinned. n8n 2.x logs a compatibility warning on Postgres 16 and older, so
+    # this is 17. Minor upgrades are safe; major ones need a dump/restore.
+    image: postgres:17.6-alpine
     restart: unless-stopped
     logging: *default-logging
     environment:

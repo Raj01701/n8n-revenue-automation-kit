@@ -137,7 +137,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -181,7 +180,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -249,7 +247,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -293,7 +290,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -361,7 +357,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -387,7 +382,6 @@
           "name": "Postgres - n8n operations DB"
         }
       },
-      "alwaysOutputData": true,
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 2000
@@ -422,7 +416,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -461,7 +454,7 @@
           "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:no_entry: *Dunning exhausted - course access revoked*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Course: {{ $('Verify Signature').first().json.course_id }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n• Emails sent: 0h, 24h, 72h - invoice still unpaid at each check\n• Enrolment rows revoked: {{ $json.revoked_count }}",
+        "text": "=:no_entry: *Dunning exhausted - course access revoked*\n\u2022 Student: {{ $('Verify Signature').first().json.email }}\n\u2022 Course: {{ $('Verify Signature').first().json.course_id }}\n\u2022 Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n\u2022 Emails sent: 0h, 24h, 72h - invoice still unpaid at each check\n\u2022 Enrolment rows revoked: {{ $json.revoked_count }}",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }
@@ -492,7 +485,7 @@
           "value": "={{ $env.SLACK_ENROLMENTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:moneybag: *Failed payment recovered - dunning stopped*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}` is now *{{ $json.status }}*\n• No further chase emails will be sent and access was never touched.",
+        "text": "=:moneybag: *Failed payment recovered - dunning stopped*\n\u2022 Student: {{ $('Verify Signature').first().json.email }}\n\u2022 Invoice: `{{ $('Verify Signature').first().json.invoice_id }}` is now *{{ $json.status }}*\n\u2022 No further chase emails will be sent and access was never touched.",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }
@@ -523,7 +516,7 @@
           "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:warning: *Dunning sequence step failed*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n• Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n• Execution: {{ $execution.url }}\n\nAccess has *not* been revoked - a failed check must never be read as 'still unpaid'.",
+        "text": "=:warning: *Dunning sequence step failed*\n\u2022 Student: {{ $('Verify Signature').first().json.email }}\n\u2022 Invoice: `{{ $('Verify Signature').first().json.invoice_id }}`\n\u2022 Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n\u2022 Execution: {{ $execution.url }}\n\nAccess has *not* been revoked - a failed check must never be read as 'still unpaid'.",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }

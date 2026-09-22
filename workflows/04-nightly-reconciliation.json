@@ -80,7 +80,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -122,7 +121,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -209,7 +207,7 @@
           "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:mag: *Nightly reconciliation - {{ $('Compare Payments And Enrolments').first().json.business_date }}*\n• Payments checked: {{ $('Compare Payments And Enrolments').first().json.payments_checked }}\n• Enrolments checked: {{ $('Compare Payments And Enrolments').first().json.enrolments_checked }}\n\n*Paid but not enrolled ({{ $('Compare Payments And Enrolments').first().json.missing_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.missing_enrolments.map(m => '• ' + m.email + ' (' + m.charge_id + ')').join('\\n') || '_none_' }}\n\n*Enrolled with no matching payment ({{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.map(o => '• ' + o.email + ' (enrolment ' + o.enrolment_id + ')').join('\\n') || '_none_' }}",
+        "text": "=:mag: *Nightly reconciliation - {{ $('Compare Payments And Enrolments').first().json.business_date }}*\n\u2022 Payments checked: {{ $('Compare Payments And Enrolments').first().json.payments_checked }}\n\u2022 Enrolments checked: {{ $('Compare Payments And Enrolments').first().json.enrolments_checked }}\n\n*Paid but not enrolled ({{ $('Compare Payments And Enrolments').first().json.missing_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.missing_enrolments.map(m => '\u2022 ' + m.email + ' (' + m.charge_id + ')').join('\\n') || '_none_' }}\n\n*Enrolled with no matching payment ({{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.length }}):*\n{{ $('Compare Payments And Enrolments').first().json.orphan_enrolments.map(o => '\u2022 ' + o.email + ' (enrolment ' + o.enrolment_id + ')').join('\\n') || '_none_' }}",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }
@@ -251,7 +249,7 @@
           "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:warning: *Nightly reconciliation could not run*\n• Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n• Execution: {{ $execution.url }}\n\nNo reconciliation row was written for tonight - a silent gap in the safety net, so treat this as urgent.",
+        "text": "=:warning: *Nightly reconciliation could not run*\n\u2022 Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n\u2022 Execution: {{ $execution.url }}\n\nNo reconciliation row was written for tonight - a silent gap in the safety net, so treat this as urgent.",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }

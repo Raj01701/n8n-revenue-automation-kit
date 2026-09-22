@@ -142,7 +142,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -209,7 +208,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -292,7 +290,6 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "alwaysOutputData": true,
       "onError": "continueErrorOutput"
     },
     {
@@ -308,8 +305,7 @@
       ],
       "id": "7c9e6b01-0017-4a3b-9c2d-000000000017",
       "name": "Interpret Enrolment Response",
-      "onError": "continueErrorOutput",
-      "alwaysOutputData": true
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -347,7 +343,7 @@
           "value": "={{ $env.SLACK_ENROLMENTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:white_check_mark: *Enrolment complete*\n• Student: {{ $('Resolve Student Id').first().json.email }}\n• Course: {{ $('Resolve Student Id').first().json.course_id }}\n• Enrolment id: {{ $json.enrolment_id }}\n• Result: {{ $('Interpret Enrolment Response').first().json.state }}\n• Provider event: `{{ $('Resolve Student Id').first().json.event_id }}`",
+        "text": "=:white_check_mark: *Enrolment complete*\n\u2022 Student: {{ $('Resolve Student Id').first().json.email }}\n\u2022 Course: {{ $('Resolve Student Id').first().json.course_id }}\n\u2022 Enrolment id: {{ $json.enrolment_id }}\n\u2022 Result: {{ $('Interpret Enrolment Response').first().json.state }}\n\u2022 Provider event: `{{ $('Resolve Student Id').first().json.event_id }}`",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }
@@ -378,7 +374,7 @@
           "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
           "mode": "name"
         },
-        "text": "=:rotating_light: *Enrolment failed - money taken, access not granted*\n• Student: {{ $('Verify Signature').first().json.email }}\n• Course: {{ $('Verify Signature').first().json.course_id }}\n• Provider event: `{{ $('Verify Signature').first().json.event_id }}`\n• Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n• Execution: {{ $execution.url }}\n\nThe ledger row stays at status `received`, so workflow 04 will re-report this tonight until it is fixed.",
+        "text": "=:rotating_light: *Enrolment failed - money taken, access not granted*\n\u2022 Student: {{ $('Verify Signature').first().json.email }}\n\u2022 Course: {{ $('Verify Signature').first().json.course_id }}\n\u2022 Provider event: `{{ $('Verify Signature').first().json.event_id }}`\n\u2022 Error: {{ ($json.error && $json.error.message) || $json.message || 'see execution' }}\n\u2022 Execution: {{ $execution.url }}\n\nThe ledger row stays at status `received`, so workflow 04 will re-report this tonight until it is fixed.",
         "otherOptions": {
           "includeLinkToWorkflow": false
         }

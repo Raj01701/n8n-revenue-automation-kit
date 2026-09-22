@@ -1,0 +1,184 @@
+# ---------------------------------------------------------------------------
+# Render Blueprint - n8n on the free tier, with managed Postgres.
+#
+#   Render dashboard -> New -> Blueprint -> point it at this repository.
+#   Render reads this file, creates both resources, and wires the database
+#   connection details into the service.
+#
+# This is the official n8n image, unmodified. Everything n8n needs to survive a
+# restart lives in Postgres, which matters here: free Render services have no
+# persistent disk, so anything written to the container filesystem is lost on
+# every deploy and every wake-up. With DB_TYPE=postgresdb and the encryption key
+# supplied as an environment variable, nothing important is on disk.
+#
+# WHAT THE FREE TIER COSTS YOU - read this before pointing a payment provider at it
+#
+#   * Free web services sleep after ~15 minutes with no traffic, and take
+#     roughly 30-60 seconds to wake. A payment webhook that arrives cold will
+#     time out on the provider's first attempt. Stripe and most others retry, so
+#     the event is not lost, but "the enrolment happened two minutes later" is
+#     not the same product as "the enrolment happened". Free is for evaluating
+#     the workflows; the first paid instance type removes the sleep.
+#   * Free Postgres instances expire (Render currently gives 30 days) and are
+#     deleted. Take a dump before then - infra/backup.sh does it.
+#   * Executions are capped by the instance's memory, not by anything here. The
+#     dunning workflow holds an execution open for three days; on a small
+#     instance that is fine, at volume it is the reason queue mode exists.
+#
+# After the first deploy: open the service URL, create the owner account,
+# import workflows/, create the credentials listed in the README, and load
+# sql/schema.sql into the same database with any psql client using the
+# External Database URL from the Render dashboard.
+# ---------------------------------------------------------------------------
+
+databases:
+  - name: n8n-postgres
+    plan: free
+    databaseName: n8n
+    user: n8n
+    # n8n's own tables and the tables in sql/schema.sql share this database on
+    # the free tier, because the free plan is one database per instance. Load
+    # the ops schema into a dedicated schema if you want them separated:
+    #   CREATE SCHEMA revenue_ops;  then set the search_path on the credential.
+
+services:
+  - type: web
+    name: n8n
+    runtime: image
+    plan: free
+    region: oregon
+    image:
+      url: docker.n8n.io/n8nio/n8n:2.40.5
+    healthCheckPath: /healthz
+
+    envVars:
+      # --- listener ------------------------------------------------------
+      # Render routes traffic to $PORT, which defaults to 10000. n8n reads
+      # N8N_PORT, so the two have to be told the same number.
+      - key: N8N_PORT
+        value: 10000
+      - key: N8N_PROTOCOL
+        value: https
+      - key: N8N_LISTEN_ADDRESS
+        value: 0.0.0.0
+      # Render terminates TLS one hop in front of n8n.
+      - key: N8N_PROXY_HOPS
+        value: 1
+
+      # --- public identity -----------------------------------------------
+      # These come from the service itself, so the webhook URLs n8n prints are
+      # the ones a payment provider can actually reach.
+      - key: N8N_HOST
+        fromService:
+          type: web
+          name: n8n
+          property: host
+      - key: N8N_EDITOR_BASE_URL
+        fromService:
+          type: web
+          name: n8n
+          property: hostport
+      - key: WEBHOOK_URL
+        fromService:
+          type: web
+          name: n8n
+          property: hostport
+
+      # --- secrets ---------------------------------------------------------
+      # Generated once by Render and then held constant. Every stored
+      # credential is encrypted with it: if it changes, n8n refuses to start
+      # against the existing database, and if it is lost the credentials in the
+      # database cannot be decrypted. Copy it out of the dashboard into your
+      # password manager on day one.
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
+
+      # --- database --------------------------------------------------------
+      - key: DB_TYPE
+        value: postgresdb
+      - key: DB_POSTGRESDB_HOST
+        fromDatabase:
+          name: n8n-postgres
+          property: host
+      - key: DB_POSTGRESDB_PORT
+        fromDatabase:
+          name: n8n-postgres
+          property: port
+      - key: DB_POSTGRESDB_DATABASE
+        fromDatabase:
+          name: n8n-postgres
+          property: database
+      - key: DB_POSTGRESDB_USER
+        fromDatabase:
+          name: n8n-postgres
+          property: user
+      - key: DB_POSTGRESDB_PASSWORD
+        fromDatabase:
+          name: n8n-postgres
+          property: password
+      # Render's managed Postgres requires TLS and presents a certificate the
+      # container does not have a root for.
+      - key: DB_POSTGRESDB_SSL_ENABLED
+        value: true
+      - key: DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED
+        value: false
+
+      # --- execution data --------------------------------------------------
+      # Tighter than the self-hosted defaults because free Postgres is small.
+      - key: EXECUTIONS_DATA_PRUNE
+        value: true
+      - key: EXECUTIONS_DATA_MAX_AGE
+        value: 168
+      - key: EXECUTIONS_DATA_PRUNE_MAX_COUNT
+        value: 10000
+      - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
+        value: all
+      - key: EXECUTIONS_DATA_SAVE_ON_ERROR
+        value: all
+      - key: EXECUTIONS_DATA_SAVE_ON_PROGRESS
+        value: true
+
+      # --- required by the Code nodes in workflows 01 and 02 ---------------
+      - key: NODE_FUNCTION_ALLOW_BUILTIN
+        value: crypto
+      - key: N8N_BLOCK_ENV_ACCESS_IN_NODE
+        value: false
+      - key: N8N_RUNNERS_ENABLED
+        value: true
+
+      # --- housekeeping ----------------------------------------------------
+      - key: GENERIC_TIMEZONE
+        value: Australia/Sydney
+      - key: TZ
+        value: Australia/Sydney
+      - key: N8N_DIAGNOSTICS_ENABLED
+        value: false
+      - key: N8N_HIRING_BANNER_ENABLED
+        value: false
+
+      # --- read by the workflow expressions --------------------------------
+      # sync: false means Render prompts for the value on first deploy and
+      # never stores it in this file. The three secrets below belong to your
+      # vendors; nothing about them should be in git.
+      - key: PAYMENT_PROVIDER_NAME
+        sync: false
+      - key: PAYMENT_API_BASE
+        sync: false
+      - key: PAYMENT_WEBHOOK_SECRET
+        sync: false
+      - key: THINKIFIC_API_BASE
+        sync: false
+      - key: THINKIFIC_TEMP_PASSWORD
+        sync: false
+      - key: DEFAULT_COURSE_ID
+        sync: false
+      - key: EMAIL_API_BASE
+        sync: false
+      - key: BILLING_PORTAL_URL
+        sync: false
+      - key: RECONCILIATION_TIMEZONE
+        value: Australia/Sydney
+      - key: SLACK_ENROLMENTS_CHANNEL
+        value: "#enrolments"
+      - key: SLACK_ALERTS_CHANNEL
+        value: "#automation-alerts"
