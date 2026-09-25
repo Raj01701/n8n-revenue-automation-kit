@@ -26,6 +26,7 @@ Six executions, one session, execution ids 1–6 in the same instance.
 Reproduce the whole thing in about three minutes:
 
 ```bash
+scripts/demo-down.sh          # start clean; demo-up refuses to run on an existing stack
 scripts/demo-up.sh            # n8n + Postgres + a mock provider, in Docker
 node scripts/run-scenarios.mjs
 node scripts/capture-screenshots.cjs

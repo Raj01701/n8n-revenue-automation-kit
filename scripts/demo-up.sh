@@ -16,6 +16,16 @@ cd "$ROOT/infra"
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.demo.yml --env-file .env.demo)
 
+# Refuse to run on top of an existing stack. `n8n import:workflow` creates a new
+# copy of every file each time it runs, and activating the copy then fails with a
+# webhook-path conflict against the original. A second run must start clean.
+if [[ -n "$("${COMPOSE[@]}" ps -q n8n 2>/dev/null)" ]]; then
+  echo "A demo stack is already running."
+  echo "  open it:      http://localhost:5678"
+  echo "  start clean:  scripts/demo-down.sh && scripts/demo-up.sh"
+  exit 1
+fi
+
 # The mock Slack listener needs a certificate, because n8n's Slack node insists
 # on https://slack.com/api and the demo maps that name to the mock container.
 if [[ ! -f "$ROOT/mocks/tls/mock.crt" ]]; then
